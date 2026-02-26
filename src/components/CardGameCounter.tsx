@@ -14,198 +14,225 @@ export default function CardGameCounter() {
   const [newPlayerName, setNewPlayerName] = useState("");
   const [playerId] = useState(() => `player-${Date.now()}-${Math.random()}`);
   const [connected, setConnected] = useState(false);
+  const [hasJoined, setHasJoined] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const pollIntervalRef = useRef<NodeJS.Timeout | undefined>(undefined);
+  const reconnectAttemptsRef = useRef(0);
+  const usePollingRef = useRef(false);
 
-  // 连接到WebSocket服务器
-  useEffect(() => {
-    let reconnectTimeout: NodeJS.Timeout;
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    const reconnectDelay = 3000;
-    let usePolling = false; // 标志是否使用polling模式
+  const maxReconnectAttempts = 5;
+  const reconnectDelay = 3000;
 
-    const connectWebSocket = () => {
-      try {
-        const protocol = window.location.protocol === "https:" ? "wss" : "ws";
-        const ws = new WebSocket(
-          `${protocol}://${window.location.host}/api/card-game`,
-        );
+  // 建立WebSocket连接
+  const connectWebSocket = () => {
+    try {
+      const protocol = window.location.protocol === "https:" ? "wss" : "ws";
+      const ws = new WebSocket(
+        `${protocol}://${window.location.host}/api/card-game`,
+      );
 
-        ws.onopen = () => {
-          setConnected(true);
-          reconnectAttempts = 0;
-          usePolling = false;
-          console.log("✅ WebSocket connected");
-        };
+      ws.onopen = () => {
+        setConnected(true);
+        reconnectAttemptsRef.current = 0;
+        usePollingRef.current = false;
+        console.log("✅ WebSocket connected");
+      };
 
-        ws.onmessage = (event) => {
-          try {
-            const message = JSON.parse(event.data);
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
 
-            switch (message.type) {
-              case "init":
-                const playerMap = new Map<string, Player>();
-                message.players.forEach((player: Player) => {
-                  playerMap.set(player.id, player);
-                });
-                setPlayers(playerMap);
-                break;
-
-              case "player-joined":
-                setPlayers((prev) => {
-                  const newMap = new Map(prev);
-                  newMap.set(message.player.id, message.player);
-                  return newMap;
-                });
-                break;
-
-              case "score-updated":
-                setPlayers((prev) => {
-                  const newMap = new Map(prev);
-                  const player = newMap.get(message.playerId);
-                  if (player) {
-                    player.score = message.score;
-                    newMap.set(message.playerId, { ...player });
-                  }
-                  return newMap;
-                });
-                break;
-
-              case "game-reset":
-                setPlayers((prev) => {
-                  const newMap = new Map(prev);
-                  newMap.forEach((player) => {
-                    player.score = 0;
-                  });
-                  return newMap;
-                });
-                break;
-
-              case "player-removed":
-                setPlayers((prev) => {
-                  const newMap = new Map(prev);
-                  newMap.delete(message.playerId);
-                  return newMap;
-                });
-                break;
-            }
-          } catch (error) {
-            console.error("❌ Error parsing WebSocket message:", error);
-          }
-        };
-
-        ws.onerror = (event) => {
-          setConnected(false);
-          console.error("❌ WebSocket error:", event);
-        };
-
-        ws.onclose = () => {
-          setConnected(false);
-          console.log("⚠️ WebSocket disconnected");
-
-          // 尝试重新连接
-          if (reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts++;
-            console.log(
-              `Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}...`,
-            );
-            reconnectTimeout = setTimeout(() => {
-              connectWebSocket();
-            }, reconnectDelay);
-          } else {
-            console.warn(
-              "❌ Failed to connect with WebSocket, falling back to polling mode",
-            );
-            usePolling = true;
-            setConnected(true); // 在polling模式中也显示已连接
-            startPolling();
-          }
-        };
-
-        wsRef.current = ws;
-      } catch (error) {
-        console.error("❌ Error creating WebSocket:", error);
-        setConnected(false);
-      }
-    };
-
-    const startPolling = () => {
-      // 定期轮询获取游戏状态
-      const pollInterval = setInterval(() => {
-        if (usePolling && wsRef.current === null) {
-          fetch("/api/card-game/state")
-            .then((res) => res.json() as Promise<any>)
-            .then((data) => {
+          switch (message.type) {
+            case "init":
               const playerMap = new Map<string, Player>();
-              data.players.forEach((player: Player) => {
+              message.players.forEach((player: Player) => {
                 playerMap.set(player.id, player);
               });
               setPlayers(playerMap);
-            })
-            .catch((err) => console.error("Polling error:", err));
+              break;
+
+            case "player-joined":
+              setPlayers((prev) => {
+                const newMap = new Map(prev);
+                newMap.set(message.player.id, message.player);
+                return newMap;
+              });
+              break;
+
+            case "score-updated":
+              setPlayers((prev) => {
+                const newMap = new Map(prev);
+                const player = newMap.get(message.playerId);
+                if (player) {
+                  player.score = message.score;
+                  newMap.set(message.playerId, { ...player });
+                }
+                return newMap;
+              });
+              break;
+
+            case "game-reset":
+              setPlayers((prev) => {
+                const newMap = new Map(prev);
+                newMap.forEach((player) => {
+                  player.score = 0;
+                });
+                return newMap;
+              });
+              break;
+
+            case "player-removed":
+              setPlayers((prev) => {
+                const newMap = new Map(prev);
+                newMap.delete(message.playerId);
+                return newMap;
+              });
+              break;
+          }
+        } catch (error) {
+          console.error("❌ Error parsing WebSocket message:", error);
         }
-      }, 1000);
+      };
 
-      return () => clearInterval(pollInterval);
-    };
+      ws.onerror = (event) => {
+        setConnected(false);
+        console.error("❌ WebSocket error:", event);
+      };
 
-    connectWebSocket();
+      ws.onclose = () => {
+        setConnected(false);
+        console.log("⚠️ WebSocket disconnected");
 
-    return () => {
-      clearTimeout(reconnectTimeout);
-      wsRef.current?.close();
-    };
-  }, []);
+        // 只有在加入游戏后才尝试重新连接
+        if (hasJoined && reconnectAttemptsRef.current < maxReconnectAttempts) {
+          reconnectAttemptsRef.current++;
+          console.log(
+            `Reconnect attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts}...`,
+          );
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket();
+          }, reconnectDelay);
+        } else if (
+          hasJoined &&
+          reconnectAttemptsRef.current >= maxReconnectAttempts
+        ) {
+          console.warn(
+            "❌ Failed to connect with WebSocket, falling back to polling mode",
+          );
+          usePollingRef.current = true;
+          setConnected(true);
+          startPolling();
+        }
+      };
 
-  const addPlayer = () => {
-    if (!newPlayerName.trim() || !connected) {
-      console.warn("⚠️ Cannot add player: not connected or empty name");
-      return;
+      wsRef.current = ws;
+    } catch (error) {
+      console.error("❌ Error creating WebSocket:", error);
+      setConnected(false);
     }
+  };
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      // WebSocket模式
-      try {
-        wsRef.current.send(
-          JSON.stringify({
-            type: "join",
-            playerId,
-            playerName: newPlayerName,
-          }),
-        );
-        setNewPlayerName("");
-      } catch (error) {
-        console.error("❌ Error sending join message:", error);
-      }
-    } else {
-      // HTTP Polling模式
-      fetch("/api/card-game/state", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "join",
-          playerId,
-          playerName: newPlayerName,
-        }),
-      })
-        .then((res) => res.json() as Promise<any>)
-        .then((data) => {
-          if (data.success) {
+  const startPolling = () => {
+    pollIntervalRef.current = setInterval(() => {
+      if (usePollingRef.current) {
+        fetch("/api/card-game/state")
+          .then((res) => res.json() as Promise<any>)
+          .then((data) => {
             const playerMap = new Map<string, Player>();
             data.players.forEach((player: Player) => {
               playerMap.set(player.id, player);
             });
             setPlayers(playerMap);
-            setNewPlayerName("");
-          }
-        })
-        .catch((error) => console.error("❌ Error adding player:", error));
+          })
+          .catch((err) => console.error("Polling error:", err));
+      }
+    }, 1000);
+  };
+
+  // 清理连接
+  const disconnectWebSocket = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
     }
+    if (pollIntervalRef.current) {
+      clearInterval(pollIntervalRef.current);
+    }
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setConnected(false);
+  };
+
+  // 清理效果
+  useEffect(() => {
+    return () => {
+      disconnectWebSocket();
+    };
+  }, []);
+
+  const addPlayer = () => {
+    if (!newPlayerName.trim()) {
+      console.warn("⚠️ Please enter a player name");
+      return;
+    }
+
+    // 首次加入时建立连接
+    if (!hasJoined) {
+      setHasJoined(true);
+      reconnectAttemptsRef.current = 0;
+      usePollingRef.current = false;
+      connectWebSocket();
+    }
+
+    // 延迟发送join消息，确保连接已建立
+    setTimeout(() => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        // WebSocket模式
+        try {
+          wsRef.current.send(
+            JSON.stringify({
+              type: "join",
+              playerId,
+              playerName: newPlayerName,
+            }),
+          );
+          setNewPlayerName("");
+        } catch (error) {
+          console.error("❌ Error sending join message:", error);
+        }
+      } else {
+        // HTTP Polling模式
+        fetch("/api/card-game/state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: "join",
+            playerId,
+            playerName: newPlayerName,
+          }),
+        })
+          .then((res) => res.json() as Promise<any>)
+          .then((data) => {
+            if (data.success) {
+              const playerMap = new Map<string, Player>();
+              data.players.forEach((player: Player) => {
+                playerMap.set(player.id, player);
+              });
+              setPlayers(playerMap);
+              setNewPlayerName("");
+              setConnected(true);
+            }
+          })
+          .catch((error) => console.error("❌ Error adding player:", error));
+      }
+    }, 100);
   };
 
   const updateScore = (playerId: string, delta: number) => {
-    if (!connected) {
-      console.warn("⚠️ Cannot update score: not connected");
+    if (!hasJoined) {
+      console.warn("⚠️ Please join the game first");
       return;
     }
 
@@ -253,8 +280,8 @@ export default function CardGameCounter() {
   };
 
   const resetGame = () => {
-    if (!connected) {
-      console.warn("⚠️ Cannot reset game: not connected");
+    if (!hasJoined) {
+      console.warn("⚠️ Please join the game first");
       return;
     }
 
@@ -293,8 +320,8 @@ export default function CardGameCounter() {
   };
 
   const removePlayer = (id: string) => {
-    if (!connected) {
-      console.warn("⚠️ Cannot remove player: not connected");
+    if (!hasJoined) {
+      console.warn("⚠️ Please join the game first");
       return;
     }
 
@@ -345,19 +372,26 @@ export default function CardGameCounter() {
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-4xl font-bold text-white">🃏 打牌计数器</h1>
           <div className="flex flex-col items-end gap-2">
-            <div className="flex items-center gap-2">
-              <div
-                className={`w-4 h-4 rounded-full ${
-                  connected ? "bg-green-500 animate-pulse" : "bg-red-500"
-                }`}
-              ></div>
-              <span className="text-white font-semibold">
-                {connected ? "✅ 已连接" : "❌ 未连接"}
-              </span>
-            </div>
-            {!connected && (
+            {hasJoined && (
+              <div className="flex items-center gap-2">
+                <div
+                  className={`w-4 h-4 rounded-full ${
+                    connected ? "bg-green-500 animate-pulse" : "bg-red-500"
+                  }`}
+                ></div>
+                <span className="text-white font-semibold">
+                  {connected ? "✅ 已连接" : "❌ 未连接"}
+                </span>
+              </div>
+            )}
+            {!connected && hasJoined && (
               <span className="text-sm text-orange-300">
                 正在尝试重新连接...
+              </span>
+            )}
+            {!hasJoined && (
+              <span className="text-sm text-blue-300">
+                输入名字后加入游戏...
               </span>
             )}
           </div>
@@ -365,7 +399,9 @@ export default function CardGameCounter() {
 
         {/* 添加玩家面板 */}
         <div className="bg-white bg-opacity-10 backdrop-blur-lg rounded-lg p-6 mb-8 border border-white border-opacity-20">
-          <h2 className="text-xl font-bold text-white mb-4">添加玩家</h2>
+          <h2 className="text-xl font-bold text-white mb-4">
+            {hasJoined ? "🎮 游戏中" : "📝 加入游戏"}
+          </h2>
           <div className="flex gap-2">
             <input
               type="text"
@@ -374,22 +410,24 @@ export default function CardGameCounter() {
               onKeyPress={(e) => e.key === "Enter" && addPlayer()}
               placeholder="输入玩家名字..."
               className="flex-1 px-4 py-2 rounded-lg bg-white bg-opacity-90 text-gray-900 placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-yellow-400"
-              disabled={!connected}
+              disabled={hasJoined}
             />
             <button
               onClick={addPlayer}
-              disabled={!connected || !newPlayerName.trim()}
+              disabled={!newPlayerName.trim() || hasJoined}
               className="px-6 py-2 bg-yellow-400 hover:bg-yellow-300 disabled:bg-gray-400 text-gray-900 font-bold rounded-lg transition-colors"
             >
-              加入游戏
+              {hasJoined ? "已加入" : "加入游戏"}
             </button>
-            <button
-              onClick={resetGame}
-              disabled={!connected || players.size === 0}
-              className="px-6 py-2 bg-red-500 hover:bg-red-600 disabled:bg-gray-400 text-white font-bold rounded-lg transition-colors"
-            >
-              重置游戏
-            </button>
+            {hasJoined && (
+              <button
+                onClick={resetGame}
+                disabled={players.size === 0}
+                className="px-6 py-2 bg-red-500 hover:bg-red-600 disabled:bg-gray-400 text-white font-bold rounded-lg transition-colors"
+              >
+                重置游戏
+              </button>
+            )}
           </div>
         </div>
 
