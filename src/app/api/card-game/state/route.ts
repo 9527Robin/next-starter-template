@@ -16,18 +16,26 @@ export const gameState = {
 export async function GET(request: NextRequest) {
   try {
     const playersArray = Array.from(gameState.players.values());
-    return Response.json({
-      success: true,
-      players: playersArray,
-    });
+    return new Response(
+      JSON.stringify({
+        success: true,
+        players: playersArray,
+      }),
+      {
+        headers: { "Content-Type": "application/json" },
+      },
+    );
   } catch (error) {
     console.error("❌ Error getting game state:", error);
-    return Response.json(
-      {
+    return new Response(
+      JSON.stringify({
         success: false,
         error: "Failed to get game state",
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
       },
-      { status: 500 },
     );
   }
 }
@@ -79,12 +87,15 @@ export async function POST(request: NextRequest) {
     });
   } catch (error) {
     console.error("❌ Error processing action:", error);
-    return Response.json(
-      {
+    return new Response(
+      JSON.stringify({
         success: false,
         error: "Failed to process action",
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
       },
-      { status: 500 },
     );
   }
 }

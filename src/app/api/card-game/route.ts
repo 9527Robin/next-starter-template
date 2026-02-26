@@ -16,127 +16,139 @@ let gameState = {
 };
 
 export async function GET(request: Request) {
-  const upgrade = request.headers.get("upgrade");
+  try {
+    const upgrade = request.headers.get("upgrade");
 
-  if (upgrade !== "websocket") {
-    return new Response("Expected Upgrade: websocket", { status: 426 });
-  }
+    if (upgrade !== "websocket") {
+      // 如果客户端不是WebSocket升级请求，返回错误提示
+      return new Response("Expected Upgrade: websocket", { status: 426 });
+    }
 
-  let webSocketPair: any;
+    let webSocketPair: any;
 
-  // 检查是否在Cloudflare Workers环境
-  if (typeof WebSocketPair !== "undefined") {
-    // @ts-ignore - Cloudflare Workers环境
-    webSocketPair = new WebSocketPair();
-  } else if (
-    typeof globalThis !== "undefined" &&
-    "WebSocketPair" in globalThis
-  ) {
-    // @ts-ignore - 备用检查
-    webSocketPair = new globalThis.WebSocketPair();
-  } else {
-    return new Response("WebSocket not supported in this environment", {
-      status: 400,
+    // 检查是否在Cloudflare Workers环境
+    if (typeof WebSocketPair !== "undefined") {
+      // @ts-ignore - Cloudflare Workers环境
+      webSocketPair = new WebSocketPair();
+    } else if (
+      typeof globalThis !== "undefined" &&
+      "WebSocketPair" in globalThis
+    ) {
+      // @ts-ignore - 备用检查
+      webSocketPair = new globalThis.WebSocketPair();
+    } else {
+      return new Response("WebSocket not supported in this environment", {
+        status: 400,
+      });
+    }
+
+    const [client, server] = Object.values(webSocketPair) as any[];
+
+    // 将连接添加到Set中
+    connections.add(server as unknown as WebSocket);
+
+    // 发送欢迎消息和当前游戏状态
+    try {
+      const playersArray = Array.from(gameState.players.values());
+      (server as any).send(
+        JSON.stringify({
+          type: "init",
+          players: playersArray,
+          roomId: gameState.roomId,
+        }),
+      );
+    } catch (error) {
+      console.error("❌ Error sending init message:", error);
+    }
+
+    // 处理客户端消息
+    (server as any).addEventListener("message", (event: any) => {
+      try {
+        const message = JSON.parse(event.data);
+        console.log("📨 Received message:", message.type);
+
+        switch (message.type) {
+          case "join":
+            gameState.players.set(message.playerId, {
+              id: message.playerId,
+              name: message.playerName,
+              score: 0,
+              timestamp: Date.now(),
+            });
+            console.log("✅ Player joined:", message.playerName);
+            broadcastToAll({
+              type: "player-joined",
+              player: gameState.players.get(message.playerId),
+            });
+            break;
+
+          case "update-score":
+            const player = gameState.players.get(message.playerId);
+            if (player) {
+              player.score = message.score;
+              player.timestamp = Date.now();
+              console.log(
+                `📊 Score updated: ${player.name} = ${message.score}`,
+              );
+              broadcastToAll({
+                type: "score-updated",
+                playerId: message.playerId,
+                score: message.score,
+              });
+            }
+            break;
+
+          case "reset-game":
+            gameState.players.forEach((player) => {
+              player.score = 0;
+            });
+            console.log("🔄 Game reset");
+            broadcastToAll({
+              type: "game-reset",
+            });
+            break;
+
+          case "remove-player":
+            const removedPlayer = gameState.players.get(message.playerId);
+            gameState.players.delete(message.playerId);
+            console.log("❌ Player removed:", removedPlayer?.name);
+            broadcastToAll({
+              type: "player-removed",
+              playerId: message.playerId,
+            });
+            break;
+
+          default:
+            console.warn("⚠️ Unknown message type:", message.type);
+        }
+      } catch (error) {
+        console.error("❌ WebSocket message error:", error);
+      }
+    });
+
+    (server as any).addEventListener("close", () => {
+      console.log("⚠️ WebSocket closed");
+      connections.delete(server as unknown as WebSocket);
+    });
+
+    (server as any).addEventListener("error", (event: any) => {
+      console.error("❌ WebSocket error:", event);
+      connections.delete(server as unknown as WebSocket);
+    });
+
+    // @ts-ignore - webSocket来自Cloudflare Workers运行时
+    return new Response(null, {
+      status: 101,
+      webSocket: client as any,
+    });
+  } catch (err) {
+    // 捕获任何未处理异常并返回500，防止Worker崩溃
+    console.error("❌ Unexpected error in /api/card-game GET:", err);
+    return new Response(JSON.stringify({ message: "Internal server error" }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" },
     });
   }
-
-  const [client, server] = Object.values(webSocketPair) as any[];
-
-  // 将连接添加到Set中
-  connections.add(server as unknown as WebSocket);
-
-  // 发送欢迎消息和当前游戏状态
-  try {
-    const playersArray = Array.from(gameState.players.values());
-    (server as any).send(
-      JSON.stringify({
-        type: "init",
-        players: playersArray,
-        roomId: gameState.roomId,
-      }),
-    );
-  } catch (error) {
-    console.error("❌ Error sending init message:", error);
-  }
-
-  // 处理客户端消息
-  (server as any).addEventListener("message", (event: any) => {
-    try {
-      const message = JSON.parse(event.data);
-      console.log("📨 Received message:", message.type);
-
-      switch (message.type) {
-        case "join":
-          gameState.players.set(message.playerId, {
-            id: message.playerId,
-            name: message.playerName,
-            score: 0,
-            timestamp: Date.now(),
-          });
-          console.log("✅ Player joined:", message.playerName);
-          broadcastToAll({
-            type: "player-joined",
-            player: gameState.players.get(message.playerId),
-          });
-          break;
-
-        case "update-score":
-          const player = gameState.players.get(message.playerId);
-          if (player) {
-            player.score = message.score;
-            player.timestamp = Date.now();
-            console.log(`📊 Score updated: ${player.name} = ${message.score}`);
-            broadcastToAll({
-              type: "score-updated",
-              playerId: message.playerId,
-              score: message.score,
-            });
-          }
-          break;
-
-        case "reset-game":
-          gameState.players.forEach((player) => {
-            player.score = 0;
-          });
-          console.log("🔄 Game reset");
-          broadcastToAll({
-            type: "game-reset",
-          });
-          break;
-
-        case "remove-player":
-          const removedPlayer = gameState.players.get(message.playerId);
-          gameState.players.delete(message.playerId);
-          console.log("❌ Player removed:", removedPlayer?.name);
-          broadcastToAll({
-            type: "player-removed",
-            playerId: message.playerId,
-          });
-          break;
-
-        default:
-          console.warn("⚠️ Unknown message type:", message.type);
-      }
-    } catch (error) {
-      console.error("❌ WebSocket message error:", error);
-    }
-  });
-
-  (server as any).addEventListener("close", () => {
-    console.log("⚠️ WebSocket closed");
-    connections.delete(server as unknown as WebSocket);
-  });
-
-  (server as any).addEventListener("error", (event: any) => {
-    console.error("❌ WebSocket error:", event);
-    connections.delete(server as unknown as WebSocket);
-  });
-
-  // @ts-ignore - webSocket来自Cloudflare Workers运行时
-  return new Response(null, {
-    status: 101,
-    webSocket: client as any,
-  });
 }
 
 function broadcastToAll(message: any) {
